@@ -1,5 +1,6 @@
 import logging
 import re
+import os  # <-- Added this import
 from datetime import timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, ChatMember
 from telegram.constants import ParseMode
@@ -12,35 +13,9 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ----------------------------------------------------
-# 🌟 KEEP-ALIVE ADDITIONS (Requires 'Flask' dependency)
-# ----------------------------------------------------
-from flask import Flask
-import threading
-import os
-
-# Initialize Flask app
-web_app = Flask(__name__)
-# Get the port assigned by the hosting environment (Render)
-PORT = int(os.environ.get("PORT", 8080))
-
-@web_app.route('/')
-@web_app.route('/healthz')
-def health_check():
-    """A simple endpoint that is pinged by an external service to keep the bot awake."""
-    return "Telegram Bot is Running (Polling Active)!", 200
-
-def run_flask():
-    """Starts the Flask web server in a new thread."""
-    print(f"Flask Web Server starting on port {PORT}...")
-    # Setting threaded=True is helpful when running in development/simple environments
-    web_app.run(host='0.0.0.0', port=PORT, threaded=True)
-
-# ----------------------------------------------------
-
 # --- CONFIGURATION ---
-# NOTE: Replace with your actual token
-BOT_TOKEN = "7974658489:AAFCdZtki5NVOn7ez9UukXcCSYtpvF2fnVg"
+# NOTE: The BOT_TOKEN will be read from environment variables (Render's settings)
+# BOT_TOKEN = "7974658489:AAFCdZtki5NVOn7ez9UukXcCSYtpvF2fnVg" 
 
 # Multiple admin IDs
 ADMIN_IDS = [8186973947, 7857898495]
@@ -56,7 +31,6 @@ DEFAULT_MUTE_DURATION_HOURS = 1
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
-# Using __name__ for logger initialization
 logger = logging.getLogger(__name__)
 
 # Track warnings
@@ -104,7 +78,7 @@ async def apply_punishment(chat_id: int, user: object, count: int, context: Cont
             await message_to_delete.delete()
         except Exception as e:
             logger.warning(f"Failed to delete message from {user.id}: {e}")
-            pass # This 'pass' is correctly indented
+            pass
 
     if count == 1:
         await context.bot.send_message(
@@ -132,7 +106,6 @@ async def apply_punishment(chat_id: int, user: object, count: int, context: Cont
     else:
         try:
             # Ban the user
-            # All lines in this 'try' block are correctly aligned
             await context.bot.ban_chat_member(chat_id, user.id)
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -144,12 +117,12 @@ async def apply_punishment(chat_id: int, user: object, count: int, context: Cont
                 del user_warnings[user.id]
 
         except Exception as e:
-            # All lines in this 'except' block are correctly aligned
             logger.error(f"Failed to ban {user.id}: {e}")
             await context.bot.send_message(chat_id, f"❌ Failed to ban {user_mention}. Bot may lack admin rights.", parse_mode=ParseMode.HTML)
 
 
 # --- BOT COMMANDS ---
+# (All your commands from start_command to clearwarn_command are identical)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Greets the user and gives bot status."""
@@ -214,6 +187,316 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def warn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually issues a strike to a user."""
     chat = update.effective_chat
+    issuer = update.effective_user
+    
+    if not (is_admin(issuer.id) or await is_group_admin(chat.id, issuer.id, context)):
+        await update.message.reply_text("⛔ You must be a Super Admin or Group Admin to use this command.")
+        return
+
+    target_id = await get_target_user_id(update, context)
+    if not target_id:
+        return
+
+    try:
+        target_user = await context.bot.get_chat_member(chat.id, target_id)
+        user = target_user.user
+        
+        if await is_group_admin(chat.id, user.id, context):
+            await update.message.reply_text(f"🚫 Cannot warn {user.mention_html()}: they are a group admin.", parse_mode=ParseMode.HTML)
+            return
+            
+        user_warnings[user.id] = user_warnings.get(user.id, 0) + 1
+        count = user_warnings[user.id]
+        
+        await update.message.reply_text(f"Manual strike issued to {user.mention_html()}. Strike count: {count}", parse_mode=ParseMode.HTML)
+        await apply_punishment(chat.id, user, count, context)
+        
+    except Exception as e:
+        logger.error(f"Error in warn command: {e}")
+        await update.message.reply_text("❌ Error processing warn command. User ID may be invalid or bot lacks permissions.")
+
+
+async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mutes a user for a specified duration."""
+    chat = update.effective_chat
+    issuer = update.effective_user
+    
+    if not (is_admin(issuer.id) or await is_group_admin(chat.id, issuer.id, context)):
+        await update.message.reply_text("⛔ You must be a Super Admin or Group Admin to use this command.")
+        return
+
+    target_id = await get_target_user_id(update, context)
+    if not target_id:
+        return
+    
+    duration_hours = DEFAULT_MUTE_DURATION_HOURS
+    if len(context.args) > 0 and context.args[-1].isdigit():
+        duration_hours = int(context.args[-1])
+
+    try:
+        target_user = await context.bot.get_chat_member(chat.id, target_id)
+        user = target_user.user
+
+        if await is_group_admin(chat.id, user.id, context):
+            await update.message.reply_text(f"🚫 Cannot mute {user.mention_html()}: they are a group admin.", parse_mode=ParseMode.HTML)
+            return
+
+        await context.bot.restrict_chat_member(
+            chat.id,
+            user.id,
+            ChatPermissions(can_send_messages=False),
+            until_date=timedelta(hours=duration_hours),
+        )
+        
+        await update.message.reply_text(
+            f"✅ {user.mention_html()} has been muted for {duration_hours} hour(s).",
+            parse_mode=ParseMode.HTML
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in mute command: {e}")
+        await update.message.reply_text("❌ Error processing mute command. Bot may lack 'Restrict Members' permission.")
+
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unmutes a user."""
+    chat = update.effective_chat
+    issuer = update.effective_user
+
+    if not (is_admin(issuer.id) or await is_group_admin(chat.id, issuer.id, context)):
+        await update.message.reply_text("⛔ You must be a Super Admin or Group Admin to use this command.")
+        return
+
+    target_id = await get_target_user_id(update, context)
+    if not target_id:
+        return
+
+    try:
+        target_user = await context.bot.get_chat_member(chat.id, target_id)
+        user = target_user.user
+
+        await context.bot.restrict_chat_member(
+            chat.id,
+            user.id,
+            ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            ),
+        )
+
+        await update.message.reply_text(
+            f"✅ {user.mention_html()} has been unmuted and can talk again.",
+            parse_mode=ParseMode.HTML
+        )
+
+    except Exception as e:
+        logger.error(f"Error in unmute command: {e}")
+        await update.message.reply_text("❌ Error processing unmute command. Bot may lack 'Restrict Members' permission.")
+
+
+async def clearwarn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Resets the warning count for a specific user."""
+    chat = update.effective_chat
+    issuer = update.effective_user
+
+    if not (is_admin(issuer.id) or await is_group_admin(chat.id, issuer.id, context)):
+        await update.message.reply_text("⛔ You must be a Super Admin or Group Admin to use this command.")
+        return
+
+    target_id = await get_target_user_id(update, context)
+    if not target_id:
+        return
+        
+    try:
+        target_user = await context.bot.get_chat_member(chat.id, target_id)
+        user = target_user.user
+        
+        if user.id in user_warnings:
+            del user_warnings[user.id]
+            await update.message.reply_text(f"✅ Warning count for {user.mention_html()} has been reset.", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(f"ℹ️ {user.mention_html()} has no active warnings.", parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"Error in clearwarn command: {e}")
+        await update.message.reply_text("❌ Error processing clearwarn command.")
+
+
+# --- CORE LISTENERS ---
+# (These are all identical to your original code)
+
+async def approve_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Automatically approves chat join requests."""
+    chat = update.chat_join_request.chat
+    user = update.chat_join_request.from_user
+    logger.info(f"{user.full_name} requested to join {chat.title}")
+
+    if AUTO_APPROVE:
+        try:
+            await context.bot.approve_chat_join_request(chat.id, user.id)
+            logger.info(f"✅ Approved {user.full_name}")
+        except Exception as e:
+            logger.error(f"❌ Failed to approve: {e}")
+
+
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sends a welcome message to new members joining the group."""
+    chat = update.effective_chat
+    for member in update.message.new_chat_members:
+        if member.is_bot:
+            continue
+
+        user_mention = member.mention_html()
+        buttons = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📢 Join Our Channel", url=CHANNEL_LINK)]]
+        )
+
+        msg = (
+            f"👋 Welcome {user_mention}!\n"
+            f"You're now part of <b>{chat.title}</b> 🎉\n\n"
+            f"Make sure you’ve joined our updates channel:\n{CHANNEL_USERNAME}"
+        )
+
+        await update.message.reply_text(
+            msg, 
+            parse_mode=ParseMode.HTML, 
+            reply_markup=buttons, 
+            disable_web_page_preview=True
+        )
+
+
+async def detect_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detects links and applies the 3-strike punishment system."""
+    message = update.message
+    chat = update.effective_chat
+    user = message.from_user
+
+    if not user or user.is_bot or not message:
+        return
+
+    try:
+        if await is_group_admin(chat.id, user.id, context):
+            return
+    except Exception as e:
+        logger.warning(f"Could not check admin status for {user.id}: {e}")
+
+    text = message.text or message.caption or ""
+    link_pattern = r"(https?://|t\.me/|telegram\.me/|bit\.ly|linktr\.ee|bio\.link)"
+
+    if re.search(link_pattern, text, re.IGNORECASE):
+        user_warnings[user.id] = user_warnings.get(user.id, 0) + 1
+        count = user_warnings[user.id]
+        await apply_punishment(chat.id, user, count, context, message_to_delete=message)
+
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Super Admin-only command to send a message to all chats the bot knows about
+    from recent updates.
+    """
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("⛔ You’re not authorized to use this command.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+
+    text = " ".join(context.args)
+    sent = 0
+
+    chats_to_broadcast = set()
+
+    try:
+        updates = await context.bot.get_updates(offset=0)
+    except Exception as e:
+        logger.error(f"Failed to fetch updates for broadcast: {e}")
+        await update.message.reply_text("❌ Error fetching recent chats for broadcast.")
+        return
+
+    for item in updates:
+        if item.effective_chat:
+            chats_to_broadcast.add(item.effective_chat.id)
+    
+    if update.effective_chat:
+        chats_to_broadcast.add(update.effective_chat.id)
+
+    for chat_id in chats_to_broadcast:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Could not send broadcast to chat {chat_id}: {e}")
+
+    await update.message.reply_text(f"📢 Broadcast done. Sent to {sent} unique chats.")
+
+
+# --- MAIN FUNCTION (MODIFIED FOR RENDER) ---
+
+def main():
+    """Starts the bot using webhooks for production on Render."""
+    
+    # --- Configuration for Render ---
+    TOKEN = os.environ.get("BOT_TOKEN")
+    if not TOKEN:
+        logger.error("FATAL: BOT_TOKEN environment variable is not set.")
+        return
+
+    PORT = int(os.environ.get("PORT", "8443")) 
+    
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+    if not WEBHOOK_URL:
+        logger.error("FATAL: WEBHOOK_URL environment variable is not set.")
+        return
+    # ----------------------------------
+            
+    app = Application.builder().token(TOKEN).build()
+
+    # --- Add all your handlers ---
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("status", status_command, filters=filters.ChatType.GROUPS))
+    
+    app.add_handler(CommandHandler("warn", warn_command, filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("mute", mute_command, filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("unmute", unmute_command, filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("clearwarn", clearwarn_command, filters=filters.ChatType.GROUPS))
+    
+    app.add_handler(CommandHandler("broadcast", broadcast))
+
+    app.add_handler(ChatJoinRequestHandler(approve_join_request))
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_member)
+    )
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION), detect_links)
+    )
+    # --- End of handlers ---
+
+    logger.info("🚀 Bot is starting... setting webhook.")
+
+    # Set up and run the webhook
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,  # Use token as secret path
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}" # Full URL for Telegram
+    )
+
+    logger.info(f"✅ Bot is running on port {PORT} and listening for webhooks.")
+
+
+if __name__ == "__main__":
+    main()
     issuer = update.effective_user
     
     if not (is_admin(issuer.id) or await is_group_admin(chat.id, issuer.id, context)):
