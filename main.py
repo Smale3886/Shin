@@ -103,7 +103,7 @@ async def apply_punishment(chat_id: int, user: object, count: int, context: Cont
         except Exception as e:
             logger.error(f"Failed to mute {user.id}: {e}")
             await context.bot.send_message(chat_id, f"❌ Failed to mute {user_mention}. Bot may lack admin rights.", parse_mode=ParseMode.HTML)
-    else:
+        else:
         try:
             # Ban the user
             await context.bot.ban_chat_member(chat_id, user.id)
