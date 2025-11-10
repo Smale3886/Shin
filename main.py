@@ -61,6 +61,7 @@ async def get_target_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     return target_user.id
 
+
 async def is_group_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Checks if a user is an admin or creator of the current chat."""
     try:
