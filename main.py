@@ -118,7 +118,6 @@ async def apply_punishment(chat_id: int, user: object, count: int, context: Cont
             logger.error(f"Failed to mute {user.id}: {e}")
             await context.bot.send_message(chat_id, f"❌ Failed to mute {user_mention}. Bot may lack admin rights.", parse_mode=ParseMode.HTML)
     else:
-        # --- THIS BLOCK HAD THE INDENTATION ERROR ---
         try:
             # Ban the user
             await context.bot.ban_chat_member(chat_id, user.id)
@@ -134,7 +133,6 @@ async def apply_punishment(chat_id: int, user: object, count: int, context: Cont
         except Exception as e:
             logger.error(f"Failed to ban {user.id}: {e}")
             await context.bot.send_message(chat_id, f"❌ Failed to ban {user_mention}. Bot may lack admin rights.", parse_mode=ParseMode.HTML)
-        # --- END OF FIXED BLOCK ---
 
 
 # --- BOT COMMANDS ---
@@ -507,7 +505,10 @@ if __name__ == "__main__":
     # 2. Define the function that will run the bot's polling
     def run_bot_polling():
         logger.info("🚀 Bot is now running (polling)...")
-        app.run_polling(poll_interval=1.0)
+        # --- THIS IS THE FIX ---
+        # We tell the bot NOT to listen for shutdown signals (which fails in a thread)
+        app.run_polling(poll_interval=1.0, stop_signals=[])
+        # ---------------------
 
     # 3. Start the bot in a separate, background thread
     bot_thread = threading.Thread(target=run_bot_polling)
